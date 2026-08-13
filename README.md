@@ -1,0 +1,1 @@
+# stremio-sr-translator
