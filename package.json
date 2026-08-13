@@ -1,13 +1,14 @@
 {
   "name": "stremio-sr-translator",
-  "version": "3.0.0",
-  "description": "Fast Free Serbian Translator for Stremio",
+  "version": "3.1.0",
+  "description": "Stremio Serbian Translator",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "srt-parser-2": "^1.2.3"
   }
 }
