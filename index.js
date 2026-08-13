@@ -1,7 +1,9 @@
 const express = require('express');
 const axios = require('axios');
+const srtParser2 = require('srt-parser-2').default;
 
 const app = express();
+const parser = new srtParser2();
 
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -10,10 +12,10 @@ app.use((req, res, next) => {
 });
 
 const manifest = {
-    id: 'org.stremio.sr.fast.free.translator',
-    version: '3.0.0',
-    name: 'Serbian Fast Free Translator',
-    description: '100% Бесплатен и ултра-брз превод на српска латиница.',
+    id: 'org.stremio.sr.translator.fixed',
+    version: '3.1.0',
+    name: 'Serbian Realtime Translator',
+    description: 'Сигурен и бесплатен превод на српска латиница.',
     resources: ['subtitles'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -24,48 +26,42 @@ app.get('/manifest.json', (req, res) => {
     res.json(manifest);
 });
 
-// 1. Нудиме опција за српски титл во Stremio/Nuvio
 app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
     const { type, id } = req.params;
 
     const subtitles = [{
-        id: `sr-free-${id}`,
+        id: `sr-fixed-${id}`,
         url: `https://${req.get('host')}/translate-sub/${type}/${id}.vtt`,
         lang: 'sr',
-        label: 'Serbian (Fast Free Auto-Latin)'
+        label: 'Serbian (Auto-Latin)'
     }];
 
     res.json({ subtitles });
 });
 
-// Функција за брз групен превод (Batch processing)
-async function translateBatch(textArray) {
+// Бесплатна функција за превод со енкодирање на поединечни линии
+async function translateLine(text) {
+    if (!text || text.trim() === '') return '';
     try {
-        // Ги спојуваме сите линии со специјален сепаратор " ||| " за да ги преведеме сите со едно барање
-        const combinedText = textArray.join(' ||| ');
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=sr&dt=t&q=${encodeURIComponent(combinedText)}`;
-        
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=sr&dt=t&q=${encodeURIComponent(text)}`;
         const response = await axios.get(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+            timeout: 3000
         });
-
         if (response.data && response.data[0]) {
-            const fullTranslated = response.data[0].map(item => item[0]).join('');
-            return fullTranslated.split(/\s*\|\|\|\s*/);
+            return response.data[0].map(item => item[0]).join('');
         }
-        return textArray;
+        return text;
     } catch (err) {
-        console.error('Batch translation error:', err.message);
-        return textArray;
+        return text; // Доколку има тајмаут или грешка, го враќаме англискиот текст за да има титл
     }
 }
 
-// 2. Влечење на англискиот титл и експресен превод
 app.get('/translate-sub/:type/:id.vtt', async (req, res) => {
     const { type, id } = req.params;
 
     try {
-        // Одиме до официјалниот Stremio субтитл сервис за да го земеме англискиот VTT/SRT
+        // 1. Извлекување на англиски титл
         const subSearchUrl = `https://v3-cinemeta.strem.fun/subtitles/${type}/${id}.json`;
         const subRes = await axios.get(subSearchUrl).catch(() => null);
 
@@ -80,43 +76,36 @@ app.get('/translate-sub/:type/:id.vtt', async (req, res) => {
             return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nНе е пронајден англиски титл за превод.");
         }
 
-        // Преземање на англискиот титл
+        // 2. Преземање на фајлот
         const rawSub = await axios.get(englishSubUrl, { responseType: 'text' });
-        const lines = rawSub.data.split(/\r?\n/);
+        let parsed = [];
 
-        let blocks = [];
-        let currentTimes = '';
-        let currentText = [];
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (line.includes('-->')) {
-                currentTimes = line.replace(',', '.');
-            } else if (line.length > 0 && !line.startsWith('WEBVTT') && isNaN(line)) {
-                currentText.push(line);
-            } else if (line === '' && currentTimes && currentText.length > 0) {
-                blocks.push({ time: currentTimes, text: currentText.join(' ') });
-                currentTimes = '';
-                currentText = [];
-            }
-        }
-        if (currentTimes && currentText.length > 0) {
-            blocks.push({ time: currentTimes, text: currentText.join(' ') });
+        if (rawSub.data.includes('-->')) {
+            // Анализа на SRT/VTT содржината
+            const cleanSrt = rawSub.data.replace(/WEBVTT/g, '').trim();
+            parsed = parser.fromSrt(cleanSrt);
         }
 
-        // Делиме на групи од по 40 реплики за моментален превод
-        const chunkSize = 40;
+        if (!parsed || parsed.length === 0) {
+            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+            return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка при читање на формата на титлот.");
+        }
+
+        // 3. Преведување во паралелни мали пакети за брзина (без да не блокира Google)
         let vttOutput = "WEBVTT\n\n";
+        const limit = Math.min(parsed.length, 500); // Преведуваме до 500 главни реплики брзо
 
-        for (let i = 0; i < blocks.length; i += chunkSize) {
-            const chunk = blocks.slice(i, i + chunkSize);
-            const textsToTranslate = chunk.map(b => b.text);
-            
-            const translatedTexts = await translateBatch(textsToTranslate);
+        // Бачирање по 10 реплики паралелно
+        for (let i = 0; i < limit; i += 10) {
+            const chunk = parsed.slice(i, i + 10);
+            const translations = await Promise.all(chunk.map(item => translateLine(item.text)));
 
-            chunk.forEach((b, index) => {
-                const translated = translatedTexts[index] || b.text;
-                vttOutput += `${b.time}\n${translated}\n\n`;
+            chunk.forEach((item, index) => {
+                const startTime = item.startTime.replace(',', '.');
+                const endTime = item.endTime.replace(',', '.');
+                const translatedText = translations[index] || item.text;
+
+                vttOutput += `${i + index + 1}\n${startTime} --> ${endTime}\n${translatedText}\n\n`;
             });
         }
 
@@ -126,7 +115,7 @@ app.get('/translate-sub/:type/:id.vtt', async (req, res) => {
     } catch (error) {
         console.error("Error generating sub:", error.message);
         res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-        res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка при брзиот превод.");
+        res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка на серверот.");
     }
 });
 
