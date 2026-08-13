@@ -1,7 +1,7 @@
 {
   "name": "stremio-sr-translator",
-  "version": "3.1.0",
-  "description": "Stremio Serbian Translator",
+  "version": "3.2.0",
+  "description": "Stremio SR Translator via OpenSubtitles",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
