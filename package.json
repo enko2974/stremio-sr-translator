@@ -1,7 +1,7 @@
 {
   "name": "stremio-sr-translator",
-  "version": "2.0.0",
-  "description": "Stremio SR-Latin Realtime Subtitle Translator",
+  "version": "3.0.0",
+  "description": "Fast Free Serbian Translator for Stremio",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
