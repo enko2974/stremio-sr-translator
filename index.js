@@ -1,19 +1,16 @@
 const express = require('express');
 const axios = require('axios');
 const srtParser2 = require('srt-parser-2').default;
-const { translate } = require('@vitalets/google-translate-api');
 
 const app = express();
 const parser = new srtParser2();
 
-// Овозможи CORS за сите Stremio и Nuvio апликации
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
     next();
 });
 
-// 1. Manifest
 const manifest = {
     id: 'org.stremio.sr.translator',
     version: '1.0.0',
@@ -29,7 +26,22 @@ app.get('/manifest.json', (req, res) => {
     res.json(manifest);
 });
 
-// 2. Endpoint за листање титлови
+// Функција за брз превод преку Google Translate API
+async function translateText(text, targetLang = 'sr') {
+    try {
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+        const response = await axios.get(url);
+        if (response.data && response.data[0]) {
+            return response.data[0].map(item => item[0]).join('');
+        }
+        return text;
+    } catch (err) {
+        console.error('Translation Error:', err.message);
+        return text;
+    }
+}
+
+// 1. Понуди го опцијата за титл во Stremio
 app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
     const { type, id } = req.params;
 
@@ -43,34 +55,65 @@ app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
     res.json({ subtitles });
 });
 
-// 3. Динамичка обработка и превод
+// 2. Преземање на точниот англиски титл и преведување
 app.get('/translate-sub/:type/:id.vtt', async (req, res) => {
+    const { type, id } = req.params;
+
     try {
-        // Пример тест срт (овде во иднина може да поврзеш API за точен OpenSubtitles линк)
-        const sampleSrtUrl = 'https://raw.githubusercontent.com/andreasbm/vtt-to-srt/master/test/test.srt'; 
-        const srtResponse = await axios.get(sampleSrtUrl);
-        const parsedSrt = parser.fromSrt(srtResponse.data);
-
-        // Групен превод за максимална брзина
-        const textToTranslate = parsedSrt.map(item => item.text).join(' \n--- \n');
+        // Овде извлекуваме јавен OpenSubtitles VTT/SRT титл базиран на IMDb ID (ttXXXXXXX)
+        // Користиме јавен OpenSubtitles mirror за соодветниот филм/серија
+        const cleanId = id.split(':')[0]; // Го земаме главниот IMDb ID
+        const subSourceUrl = `https://v3-cinemeta.strem.fun/subtitles/${type}/${id}.json`;
         
-        const translationRes = await translate(textToTranslate, { to: 'sr' });
-        const translatedLines = translationRes.text.split(' \n--- \n');
-        
-        let vttOutput = "WEBVTT\n\n";
-        parsedSrt.forEach((item, index) => {
-            const translatedText = translatedLines[index] || item.text;
-            vttOutput += `${index + 1}\n`;
-            vttOutput += `${item.startTime.replace(',', '.')} --> ${item.endTime.replace(',', '.')}\n`;
-            vttOutput += `${translatedText}\n\n`;
-        });
+        const subSearchRes = await axios.get(subSourceUrl).catch(() => null);
+        let targetSubUrl = null;
 
-        res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-        res.send(vttOutput);
+        if (subSearchRes && subSearchRes.data && subSearchRes.data.subtitles) {
+            const enSub = subSearchRes.data.subtitles.find(s => s.lang === 'eng' || s.lang === 'en');
+            if (enSub) targetSubUrl = enSub.url;
+        }
+
+        // Ако не најде директен титл, врати празен VTT за да не закочи плејерот
+        if (!targetSubUrl) {
+            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+            return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nНе е најден англиски титл за превод.");
+        }
+
+        const srtResponse = await axios.get(targetSubUrl);
+        let parsedSrt = [];
+
+        if (targetSubUrl.endsWith('.vtt') || srtResponse.data.startsWith('WEBVTT')) {
+            // Едноставна конверзија од VTT во линкови
+            const rawLines = srtResponse.data.split('\n');
+            let vttOutput = "WEBVTT\n\n";
+            for (let i = 0; i < rawLines.length; i++) {
+                vttOutput += rawLines[i] + '\n';
+            }
+            // Директен превод на суровиот VTT фајл
+            const translatedVtt = await translateText(vttOutput, 'sr');
+            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+            return res.send(translatedVtt);
+        } else {
+            parsedSrt = parser.fromSrt(srtResponse.data);
+            
+            // Преведување линија по линија за стабилност
+            let vttOutput = "WEBVTT\n\n";
+            for (let i = 0; i < Math.min(parsedSrt.length, 300); i++) { // преведуваме сегментно за брзина
+                const item = parsedSrt[i];
+                const translatedText = await translateText(item.text, 'sr');
+                vttOutput += `${i + 1}\n`;
+                vttOutput += `${item.startTime.replace(',', '.')} --> ${item.endTime.replace(',', '.')}\n`;
+                vttOutput += `${translatedText}\n\n`;
+            }
+
+            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+            return res.send(vttOutput);
+        }
 
     } catch (error) {
-        console.error("Грешка при превод:", error.message);
-        res.status(500).send("Грешка при превод.");
+        console.error("Грешка при обработка:", error.message);
+        res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+        res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка при вчитување на титлот.");
     }
 });
 
