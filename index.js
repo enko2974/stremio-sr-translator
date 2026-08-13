@@ -1,9 +1,9 @@
 const express = require('express');
 const axios = require('axios');
-const srtParser2 = require('srt-parser-2').default;
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
-const parser = new srtParser2();
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -12,10 +12,10 @@ app.use((req, res, next) => {
 });
 
 const manifest = {
-    id: 'org.stremio.sr.opensub.translator',
-    version: '3.2.0',
-    name: 'Serbian Realtime Translator (OpenSubtitles)',
-    description: 'Влече англиски титлови од OpenSubtitles и ги преведува на српска латиница.',
+    id: 'org.stremio.sr.gemini.translator',
+    version: '5.0.0',
+    name: 'Serbian AI Translator (Gemini)',
+    description: 'Ултра-прецизен и брз превод на српска латиница со Gemini AI.',
     resources: ['subtitles'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -26,111 +26,104 @@ app.get('/manifest.json', (req, res) => {
     res.json(manifest);
 });
 
-// 1. Нудиме опција за српски титл во Stremio/Nuvio
 app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
     const { type, id } = req.params;
 
     const subtitles = [{
-        id: `sr-opensub-${id}`,
+        id: `sr-gemini-${id}`,
         url: `https://${req.get('host')}/translate-sub/${type}/${id}.vtt`,
         lang: 'sr',
-        label: 'Serbian (Auto-Latin)'
+        label: 'Serbian (Gemini AI Auto-Latin)'
     }];
 
     res.json({ subtitles });
 });
 
-// Брза функција за преведување преку Google Translate API
-async function translateLine(text) {
-    if (!text || text.trim() === '') return '';
+// AI Превод преку Gemini 2.5 Flash
+async function translateWithGemini(textChunk) {
+    if (!process.env.GEMINI_API_KEY) {
+        console.error("ГРЕШКА: GEMINI_API_KEY не е поставен во Render Environment Variables!");
+        return textChunk;
+    }
+
     try {
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=sr&dt=t&q=${encodeURIComponent(text)}`;
-        const response = await axios.get(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            timeout: 4000
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: `You are a subtitle translator. Translate the following subtitle text lines from English to Serbian (Latin script). 
+            Do NOT change any timestamps, block numbers, or VTT formatting. Keep line breaks identical.
+            
+            Text to translate:
+            ${textChunk}`
         });
-        if (response.data && response.data[0]) {
-            return response.data[0].map(item => item[0]).join('');
-        }
-        return text;
+
+        return response.text || textChunk;
     } catch (err) {
-        return text; // Ако има проблем со мрежата, врати го оригиналот
+        console.error("Gemini AI Translation Error:", err.message);
+        return textChunk;
     }
 }
 
-// 2. Преземање титл од OpenSubtitles V3 API и преведување
 app.get('/translate-sub/:type/:id.vtt', async (req, res) => {
     const { type, id } = req.params;
 
     try {
-        // Официјален OpenSubtitles v3 адон ендпоинт за Stremio
-        const openSubUrl = `https://opensubtitles.strem.fun/subtitles/${type}/${id}.json`;
-        const openSubRes = await axios.get(openSubUrl).catch(() => null);
+        // Наоѓање англиски титл
+        const sources = [
+            `https://v3-cinemeta.strem.fun/subtitles/${type}/${id}.json`,
+            `https://opensubtitles-v2.strem.fun/subtitles/${type}/${id}.json`
+        ];
 
         let englishSubUrl = null;
-
-        if (openSubRes && openSubRes.data && openSubRes.data.subtitles) {
-            // Наоѓаме англиски титл (eng / en)
-            const enSub = openSubRes.data.subtitles.find(s => s.lang === 'eng' || s.lang === 'en');
-            if (enSub) {
-                englishSubUrl = enSub.url;
-            }
-        }
-
-        // Доколку OpenSubtitles v3 нема, пробај преку заменскиот OpenSubtitles v2 mirror
-        if (!englishSubUrl) {
-            const fallbackUrl = `https://opensubtitles-v2.strem.fun/subtitles/${type}/${id}.json`;
-            const fbRes = await axios.get(fallbackUrl).catch(() => null);
-            if (fbRes && fbRes.data && fbRes.data.subtitles) {
-                const enSub = fbRes.data.subtitles.find(s => s.lang === 'eng' || s.lang === 'en');
-                if (enSub) englishSubUrl = enSub.url;
+        for (const srcUrl of sources) {
+            const response = await axios.get(srcUrl, { timeout: 4000 }).catch(() => null);
+            if (response && response.data && response.data.subtitles) {
+                const enSub = response.data.subtitles.find(s => s.lang === 'eng' || s.lang === 'en');
+                if (enSub && enSub.url) {
+                    englishSubUrl = enSub.url;
+                    break;
+                }
             }
         }
 
         if (!englishSubUrl) {
             res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-            return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nНе е пронајден англиски титл на OpenSubtitles.");
+            return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nНе е пронајден англиски титл.");
         }
 
-        // Преземање на англискиот титл фајл
-        const rawSub = await axios.get(englishSubUrl, { responseType: 'text' });
-        
-        // Читање на SRT / VTT содржината
-        let parsed = [];
-        const cleanText = rawSub.data.replace(/^WEBVTT/i, '').trim();
-        parsed = parser.fromSrt(cleanText);
+        const rawSubRes = await axios.get(englishSubUrl, { responseType: 'text', timeout: 5000 });
+        let rawText = rawSubRes.data;
 
-        if (!parsed || parsed.length === 0) {
-            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-            return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка при обработка на OpenSubtitles фајлот.");
+        if (!rawText.startsWith('WEBVTT')) {
+            rawText = "WEBVTT\n\n" + rawText;
         }
 
-        // Генерирање преведен VTT
-        let vttOutput = "WEBVTT\n\n";
-        
-        // Обработуваме во брзи паралелни групи (по 10 реплики одеднаш)
-        const totalLines = Math.min(parsed.length, 600); // Ограничување за максимална брзина
-        
-        for (let i = 0; i < totalLines; i += 10) {
-            const chunk = parsed.slice(i, i + 10);
-            const translations = await Promise.all(chunk.map(item => translateLine(item.text)));
+        // Gemini го преведува целиот титл во големи блокови одделени со параграфи
+        const lines = rawText.split(/\r?\n/);
+        let blocks = [];
+        let tempBlock = [];
 
-            chunk.forEach((item, index) => {
-                const startTime = item.startTime.replace(',', '.');
-                const endTime = item.endTime.replace(',', '.');
-                const translatedText = translations[index] || item.text;
+        for (let line of lines) {
+            tempBlock.push(line);
+            if (tempBlock.length >= 150) { // Преведуваме по 150 линии одеднаш
+                blocks.push(tempBlock.join('\n'));
+                tempBlock = [];
+            }
+        }
+        if (tempBlock.length > 0) blocks.push(tempBlock.join('\n'));
 
-                vttOutput += `${i + index + 1}\n${startTime} --> ${endTime}\n${translatedText}\n\n`;
-            });
+        let finalTranslatedVtt = "";
+        for (let block of blocks) {
+            const translatedBlock = await translateWithGemini(block);
+            finalTranslatedVtt += translatedBlock + "\n";
         }
 
         res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-        res.send(vttOutput);
+        res.send(finalTranslatedVtt);
 
     } catch (error) {
-        console.error("Грешка:", error.message);
+        console.error("Main Error:", error.message);
         res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-        res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка при поврзување со OpenSubtitles.");
+        res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка на серверот.");
     }
 });
 
