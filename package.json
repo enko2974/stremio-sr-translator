@@ -1,6 +1,6 @@
 {
   "name": "stremio-sr-translator",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "Gemini AI Powered Serbian Subtitle Translator for Stremio",
   "main": "index.js",
   "scripts": {
@@ -9,6 +9,6 @@
   "dependencies": {
     "express": "^4.18.2",
     "axios": "^1.6.0",
-    "@google/genai": "^0.1.1"
+    "@google/generative-ai": "^0.21.0"
   }
 }
