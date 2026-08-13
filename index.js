@@ -1,9 +1,12 @@
 const express = require('express');
 const axios = require('axios');
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+// Иницијализација на Gemini SDK
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -13,7 +16,7 @@ app.use((req, res, next) => {
 
 const manifest = {
     id: 'org.stremio.sr.gemini.translator',
-    version: '5.0.0',
+    version: '5.1.0',
     name: 'Serbian AI Translator (Gemini)',
     description: 'Ултра-прецизен и брз превод на српска латиница со Gemini AI.',
     resources: ['subtitles'],
@@ -39,24 +42,26 @@ app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
     res.json({ subtitles });
 });
 
-// AI Превод преку Gemini 2.5 Flash
+// AI Превод преку Gemini
 async function translateWithGemini(textChunk) {
     if (!process.env.GEMINI_API_KEY) {
-        console.error("ГРЕШКА: GEMINI_API_KEY не е поставен во Render Environment Variables!");
+        console.error("ГРЕШКА: GEMINI_API_KEY не е поставен во Render!");
         return textChunk;
     }
 
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: `You are a subtitle translator. Translate the following subtitle text lines from English to Serbian (Latin script). 
-            Do NOT change any timestamps, block numbers, or VTT formatting. Keep line breaks identical.
-            
-            Text to translate:
-            ${textChunk}`
-        });
+        const prompt = `You are an expert subtitle translator. Translate the following movie subtitle text from English to Serbian using Latin script (Serbian Latin).
+CRITICAL RULES:
+1. Do NOT modify timestamps (e.g. 00:01:20.000 --> 00:01:23.000), line numbers, or VTT header formatting.
+2. Translate ONLY the actual speech/text lines.
+3. Keep the exact line structure and line count.
 
-        return response.text || textChunk;
+Text to translate:
+${textChunk}`;
+
+        const result = await model.generateContent(prompt);
+        const responseText = result.response.text();
+        return responseText || textChunk;
     } catch (err) {
         console.error("Gemini AI Translation Error:", err.message);
         return textChunk;
@@ -67,7 +72,6 @@ app.get('/translate-sub/:type/:id.vtt', async (req, res) => {
     const { type, id } = req.params;
 
     try {
-        // Наоѓање англиски титл
         const sources = [
             `https://v3-cinemeta.strem.fun/subtitles/${type}/${id}.json`,
             `https://opensubtitles-v2.strem.fun/subtitles/${type}/${id}.json`
@@ -90,21 +94,21 @@ app.get('/translate-sub/:type/:id.vtt', async (req, res) => {
             return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nНе е пронајден англиски титл.");
         }
 
-        const rawSubRes = await axios.get(englishSubUrl, { responseType: 'text', timeout: 5000 });
+        const rawSubRes = await axios.get(englishSubUrl, { responseType: 'text', timeout: 6000 });
         let rawText = rawSubRes.data;
 
         if (!rawText.startsWith('WEBVTT')) {
             rawText = "WEBVTT\n\n" + rawText;
         }
 
-        // Gemini го преведува целиот титл во големи блокови одделени со параграфи
+        // Преведуваме во блокови од 100 линии за брзина и прецизност
         const lines = rawText.split(/\r?\n/);
         let blocks = [];
         let tempBlock = [];
 
         for (let line of lines) {
             tempBlock.push(line);
-            if (tempBlock.length >= 150) { // Преведуваме по 150 линии одеднаш
+            if (tempBlock.length >= 100) {
                 blocks.push(tempBlock.join('\n'));
                 tempBlock = [];
             }
