@@ -1,7 +1,7 @@
 {
   "name": "stremio-sr-translator",
-  "version": "1.0.0",
-  "description": "Stremio translator addon for Serbian Latin",
+  "version": "1.2.0",
+  "description": "Stremio SubtitleCat Serbian Addon",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -9,7 +9,6 @@
   "dependencies": {
     "express": "^4.18.2",
     "axios": "^1.6.0",
-    "srt-parser-2": "^1.2.3",
-    "@vitalets/google-translate-api": "^9.1.0"
+    "cheerio": "^1.0.0-rc.12"
   }
 }
