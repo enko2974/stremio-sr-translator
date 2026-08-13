@@ -1,10 +1,9 @@
 const express = require('express');
 const axios = require('axios');
-const srtParser2 = require('srt-parser-2').default;
 
 const app = express();
-const parser = new srtParser2();
 
+// Овозможи CORS
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -12,10 +11,10 @@ app.use((req, res, next) => {
 });
 
 const manifest = {
-    id: 'org.stremio.sr.translator',
-    version: '1.0.0',
-    name: 'Auto SR-Latin Subtitles',
-    description: 'Брз превод на англиски титлови на српски (латиница).',
+    id: 'org.stremio.sr.subtitlecat',
+    version: '1.1.0',
+    name: 'SubtitleCat SR-Latin Subtitles',
+    description: 'Автоматски српски латинични титлови директно од SubtitleCat.',
     resources: ['subtitles'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -26,94 +25,94 @@ app.get('/manifest.json', (req, res) => {
     res.json(manifest);
 });
 
-// Функција за брз превод преку Google Translate API
-async function translateText(text, targetLang = 'sr') {
-    try {
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
-        const response = await axios.get(url);
-        if (response.data && response.data[0]) {
-            return response.data[0].map(item => item[0]).join('');
-        }
-        return text;
-    } catch (err) {
-        console.error('Translation Error:', err.message);
-        return text;
-    }
-}
-
-// 1. Понуди го опцијата за титл во Stremio
+// 1. Понуди го титлот во Stremio/Nuvio
 app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
     const { type, id } = req.params;
 
     const subtitles = [{
-        id: `sr-lat-${id}`,
-        url: `https://${req.get('host')}/translate-sub/${type}/${id}.vtt`,
+        id: `subcat-sr-${id}`,
+        url: `https://${req.get('host')}/subcat-proxy/${type}/${id}.vtt`,
         lang: 'sr',
-        label: 'Serbian (Auto-Latin)'
+        label: 'Serbian (SubtitleCat Auto-Latin)'
     }];
 
     res.json({ subtitles });
 });
 
-// 2. Преземање на точниот англиски титл и преведување
-app.get('/translate-sub/:type/:id.vtt', async (req, res) => {
-    const { type, id } = req.params;
+// 2. Логика за пребарување и влечење титл од SubtitleCat
+app.get('/subcat-proxy/:type/:id.vtt', async (req, res) => {
+    const { id } = req.params;
+    
+    // id доаѓа во формат "tt1234567" или за серии "tt1234567:1:2" (imdb:season:episode)
+    const parts = id.split(':');
+    const imdbId = parts[0];
+    const season = parts[1];
+    const episode = parts[2];
 
     try {
-        // Овде извлекуваме јавен OpenSubtitles VTT/SRT титл базиран на IMDb ID (ttXXXXXXX)
-        // Користиме јавен OpenSubtitles mirror за соодветниот филм/серија
-        const cleanId = id.split(':')[0]; // Го земаме главниот IMDb ID
-        const subSourceUrl = `https://v3-cinemeta.strem.fun/subtitles/${type}/${id}.json`;
+        // Пребарување на SubtitleCat според IMDb ID
+        const searchUrl = `https://www.subtitlecat.com/index.php?search=${imdbId}`;
+        const searchRes = await axios.get(searchUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+
+        const html = searchRes.data;
         
-        const subSearchRes = await axios.get(subSourceUrl).catch(() => null);
-        let targetSubUrl = null;
+        // Наоѓање на првиот релевантен линк за титл
+        let pageLink = null;
+        const matches = html.match(/\/subtitles\/[a-zA-Z0-9-]+\.html/g);
 
-        if (subSearchRes && subSearchRes.data && subSearchRes.data.subtitles) {
-            const enSub = subSearchRes.data.subtitles.find(s => s.lang === 'eng' || s.lang === 'en');
-            if (enSub) targetSubUrl = enSub.url;
-        }
-
-        // Ако не најде директен титл, врати празен VTT за да не закочи плејерот
-        if (!targetSubUrl) {
-            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-            return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nНе е најден англиски титл за превод.");
-        }
-
-        const srtResponse = await axios.get(targetSubUrl);
-        let parsedSrt = [];
-
-        if (targetSubUrl.endsWith('.vtt') || srtResponse.data.startsWith('WEBVTT')) {
-            // Едноставна конверзија од VTT во линкови
-            const rawLines = srtResponse.data.split('\n');
-            let vttOutput = "WEBVTT\n\n";
-            for (let i = 0; i < rawLines.length; i++) {
-                vttOutput += rawLines[i] + '\n';
+        if (matches && matches.length > 0) {
+            if (season && episode) {
+                // За серии: Бараме линк кој ги содржи S01E02 или 1x02 ознаките
+                const sPattern = season.padStart(2, '0');
+                const ePattern = episode.padStart(2, '0');
+                const epQuery = `s${sPattern}e${ePattern}`;
+                const altEpQuery = `${season}x${ePattern}`;
+                
+                const foundEp = matches.find(m => m.toLowerCase().includes(epQuery) || m.toLowerCase().includes(altEpQuery));
+                pageLink = foundEp || matches[0];
+            } else {
+                pageLink = matches[0];
             }
-            // Директен превод на суровиот VTT фајл
-            const translatedVtt = await translateText(vttOutput, 'sr');
-            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-            return res.send(translatedVtt);
-        } else {
-            parsedSrt = parser.fromSrt(srtResponse.data);
-            
-            // Преведување линија по линија за стабилност
-            let vttOutput = "WEBVTT\n\n";
-            for (let i = 0; i < Math.min(parsedSrt.length, 300); i++) { // преведуваме сегментно за брзина
-                const item = parsedSrt[i];
-                const translatedText = await translateText(item.text, 'sr');
-                vttOutput += `${i + 1}\n`;
-                vttOutput += `${item.startTime.replace(',', '.')} --> ${item.endTime.replace(',', '.')}\n`;
-                vttOutput += `${translatedText}\n\n`;
-            }
-
-            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-            return res.send(vttOutput);
         }
+
+        if (!pageLink) {
+            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+            return res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nНе е пронајден титл на SubtitleCat.");
+        }
+
+        // Креирање на директен линк до српскиот/хрватскиот .vtt или .srt фајл од SubtitleCat
+        // SubtitleCat користи стандардизирана патека за преведените титлови: /subtitles/sr/ или /subtitles/hr/
+        const subCatBase = pageLink.replace('/subtitles/', '').replace('.html', '');
+        
+        // Се обидуваме да го преземеме српскиот преведен фајл од SubtitleCat
+        let subFileUrl = `https://www.subtitlecat.com/subs/${subCatBase}-sr.vtt`;
+        let subRes = await axios.get(subFileUrl, { responseType: 'text' }).catch(() => null);
+
+        // Ако нема српски, го преземаме хрватскиот (hr) кој е исто така латиница и соодветен
+        if (!subRes || !subRes.data) {
+            subFileUrl = `https://www.subtitlecat.com/subs/${subCatBase}-hr.vtt`;
+            subRes = await axios.get(subFileUrl, { responseType: 'text' }).catch(() => null);
+        }
+
+        if (subRes && subRes.data) {
+            let vttData = subRes.data;
+            // Обезбеди се дека содржината има WEBVTT заглавие
+            if (!vttData.startsWith('WEBVTT')) {
+                vttData = "WEBVTT\n\n" + vttData;
+            }
+            res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+            return res.send(vttData);
+        }
+
+        res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+        res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nТитлот постои, но фајлот не можеше да се преземе.");
 
     } catch (error) {
-        console.error("Грешка при обработка:", error.message);
+        console.error("SubtitleCat Proxy Error:", error.message);
         res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
-        res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка при вчитување на титлот.");
+        res.send("WEBVTT\n\n1\n00:00:01.000 --> 00:00:05.000\nГрешка при поврзување со SubtitleCat.");
     }
 });
 
